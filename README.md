@@ -1,81 +1,77 @@
 # PCleaner
 
-**Windows için hafif, hızlı ve anlaşılır disk temizliği.** Geçici dosyaları ve seçtiğin önbellekleri tarayıp önizle; kullanımdaki dosyalar atlanırken temizliği terminalden veya sade masaüstü arayüzünden yönet.
+**Lightweight, fast, and straightforward disk cleanup for Windows.** Preview temporary files and selected caches before cleanup. Manage the process from a simple desktop interface or directly from your terminal, while files in use are skipped.
 
-PCleaner yerel çalışır. Python standart kütüphanesi ve Tkinter dışında çalışma zamanı bağımlılığı yoktur.
+PCleaner runs locally and has no runtime dependencies beyond the Python standard library and Tkinter.
 
-## Öne çıkanlar
+## Features
 
-- Hem kullanıcıya ait `%TEMP%` klasörünü hem de Windows klasöründeki `Temp` alanını tarar.
-- Tarama sonuçlarını temizlemeden önce gösterir; istemediğin dosyaları seçimden çıkarabilirsin.
-- Başka bir uygulama tarafından kullanılan veya erişilemeyen dosyaları atlar, kalan temizliğe devam eder ve raporlar.
-- Son Kullanılanlar kısayollarını kaldırabilir; hedef dosyalara dokunmaz.
-- İsteğe bağlı tarayıcı önbelleği ve Windows küçük resim önbelleği temizliği sunar.
-- Terminal komutlarıyla tarama, önizleme, yaş filtresi, rapor ve iptal desteği sağlar.
-- Temizlik öncesinde hangi alanların seçildiğini ve ne kadar yer açıldığını gösterir.
+- Scans both the current user's `%TEMP%` folder and the Windows `Temp` folder.
+- Previews scan results before cleanup and lets you exclude individual files.
+- Skips files that are locked by another application or cannot be accessed, continues with the remaining files, and reports skipped items.
+- Removes shortcuts from the Recent Items folder without deleting their target files.
+- Offers optional browser cache and Windows thumbnail cache cleanup.
+- Supports terminal scanning, dry runs, age filters, reports, and cancellation.
+- Shows selected cleanup areas and the amount of space recovered.
 
-## Hızlı başlangıç
+## Quick start
 
-PowerShell veya Terminal'i proje klasöründe aç:
+Open PowerShell or Windows Terminal in the project folder and run:
 
 ```powershell
 python pcleaner.py
 ```
 
-Windows'ta `PCleaner.bat` dosyasına çift tıklayarak da başlatabilirsin.
+You can also double-click `PCleaner.bat` on Windows.
 
-## Terminalden kullan
+## Use from the terminal
 
-Önce yedi günden eski uygun dosyaları tara:
+Scan eligible files older than seven days:
 
 ```powershell
 python pcleaner.py scan --days 7
 ```
 
-Silmeden deneme yap:
+Preview a cleanup without deleting anything:
 
 ```powershell
 python pcleaner.py clean user-temp windows-temp browser-cache --days 7 --dry-run
 ```
 
-Onay vererek temizle:
+Run a cleanup with an interactive confirmation:
 
 ```powershell
 python pcleaner.py clean user-temp windows-temp recent
 ```
 
-`clean` komutu `--yes` verilmedikçe terminalde onay ister. `--dry-run` hiçbir dosyayı silmez. Desteklenen yaş filtreleri 1, 3, 7, 14 ve 30 gündür.
+The `clean` command asks for confirmation unless you pass `--yes`. `--dry-run` does not delete files. Supported age filters are 1, 3, 7, 14, and 30 days.
 
-### Temizlenebilen alanlar
+### Cleanup areas
 
-| Komut | Alan |
+| Command | What it cleans |
 | --- | --- |
-| `user-temp` | Kullanıcının `%TEMP%` klasöründeki uygun dosyalar |
-| `windows-temp` | Windows klasöründeki `Temp` içindeki uygun dosyalar |
-| `recent` | Son Kullanılanlar klasöründeki `.lnk` kısayolları; hedef dosyalar korunur |
-| `browser-cache` | Chrome, Edge ve Firefox profillerindeki cache dosyaları |
-| `thumbnail-cache` | Windows Explorer küçük resim ve simge önbelleği veritabanları |
-| `recycle` | Geri Dönüşüm Kutusu; içindeki öğeler kalıcı olarak silinir |
+| `user-temp` | Eligible files in the current user's `%TEMP%` folder |
+| `windows-temp` | Eligible files in the `Temp` folder under the Windows directory |
+| `recent` | `.lnk` shortcuts in Recent Items; target files are preserved |
+| `browser-cache` | Cache files in Chrome, Edge, and Firefox profiles |
+| `thumbnail-cache` | Windows Explorer thumbnail and icon cache databases |
+| `recycle` | The Recycle Bin; items are permanently deleted |
 
-`temp`, `user-temp` için eski bir komut takma adıdır. Tarayıcı geçmişi, çerezler ve oturum dosyaları tarayıcı temizliğine dahil değildir. Tarayıcı ve küçük resim önbelleği varsayılan olarak seçili değildir. Kilitli veya erişilemeyen öğeler atlanır; diğer dosyalar işlenmeye devam eder.
+`temp` is a legacy alias for `user-temp`. Browser history, cookies, and session files are not included in browser cache cleanup. Browser and thumbnail caches are not selected by default. Locked or inaccessible items are skipped while the remaining files are processed.
 
-## Taşınabilir EXE oluştur
+## Build the portable EXE
 
-EXE'yi derlemek için PyInstaller gerekir; oluşturulan uygulamayı çalıştırmak için bilgisayarda Python kurulması gerekmez.
+PyInstaller is required to build the EXE. The built application does not require Python to be installed on the target computer.
 
 ```powershell
 python -m pip install -r requirements-build.txt
 .\build_exe.ps1
 ```
 
-Çıktılar `release\PCleaner\PCleaner.exe` ve `release\PCleaner-portable.zip` konumlarına yazılır. EXE'yi `_internal` klasörüyle birlikte taşı veya ZIP içeriğini kullan.
+The outputs are `release\PCleaner\PCleaner.exe` and `release\PCleaner-portable.zip`. Keep the `_internal` folder next to the EXE, or use the ZIP, which contains the complete folder.
 
-## Güvenli kullanım
+## Safe use
 
-- İlk kullanımda arayüzde dosya önizlemesini incele veya terminalde `--dry-run` kullan.
-- Temizleme yalnızca seçili alanları kapsar; uygulamanın kendisi sistem ayarlarını değiştirmez.
-- Geri Dönüşüm Kutusu temizliği kalıcıdır.
-
-## Lisans
-
-Bu depo henüz bir açık kaynak lisansı tanımlamıyor. Yeniden kullanım ve dağıtım koşullarını belirlemek için bir lisans eklenebilir.
+- Review the file preview in the app or use `--dry-run` before your first cleanup.
+- Cleanup only processes the areas you select; the app does not change system settings.
+- Recycle Bin cleanup permanently deletes its contents.
