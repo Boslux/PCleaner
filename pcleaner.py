@@ -4,6 +4,8 @@ import argparse
 import ctypes
 import os
 import queue
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -12,6 +14,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, ttk
+
+from windows_performance import largest_files, resource_snapshot, startup_entries
 
 
 APP_NAME = "PCleaner"
@@ -128,6 +132,14 @@ LABELS = {
     "browser-cache": "Tarayıcı önbellekleri",
     "thumbnail-cache": "Küçük resim önbelleği",
     "recycle": "Geri dönüşüm kutusu",
+}
+AREA_HELP = {
+    "user-temp": "%TEMP%, uygulamaların geçici çalışma dosyalarını tuttuğu kullanıcı klasörüdür.",
+    "windows-temp": "Windows ve kurulum programlarının geçici sistem dosyalarıdır. Bazı dosyalar yönetici izni gerektirebilir.",
+    "recent": "Windows’un son açılan dosyalar için oluşturduğu kısayollardır. Asıl dosyalar korunur.",
+    "browser-cache": "Chrome, Edge ve Firefox’un sayfaları hızlandırmak için sakladığı geçici dosyalardır. Çerezler ve geçmiş korunur.",
+    "thumbnail-cache": "Dosya Gezgini’nin küçük resim ve simge önbelleğidir. Windows gerektiğinde yeniden oluşturur.",
+    "recycle": "Geri dönüşüm kutusundaki öğeleri kalıcı olarak siler. Silmeden önce içeriğini Windows’ta kontrol edebilirsin.",
 }
 RECURSIVE_CATEGORIES = {"user-temp", "windows-temp", "browser-cache"}
 CACHE_CATEGORIES = {"user-temp", "windows-temp", "browser-cache", "thumbnail-cache"}
@@ -332,8 +344,8 @@ class PCleanerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("PCleaner · Hafif temizlik")
-        self.root.geometry("900x800")
-        self.root.minsize(800, 700)
+        self.root.geometry("940x720")
+        self.root.minsize(820, 680)
         self.root.configure(bg=BG)
         self.root.option_add("*Font", "{Segoe UI} 10")
         self.rows: dict[str, ScanResult] = {}
@@ -351,15 +363,25 @@ class PCleanerApp:
         self.busy = False
         self.cancel_event: threading.Event | None = None
         self._style()
+        self.system_drive = windows_temp_root().anchor or "C:\\"
         self._build()
+        self._refresh_disk(self._disk_usage())
         self.root.after(100, self._poll_events)
         self.scan()
 
     def _style(self):
         style = ttk.Style()
         style.theme_use("clam")
-        style.configure("TCheckbutton", background=PANEL_2, foreground=TEXT, font=("Segoe UI", 10))
-        style.map("TCheckbutton", background=[("active", PANEL_2)], foreground=[("disabled", MUTED)])
+        style.configure("TNotebook", background=BG, borderwidth=0)
+        style.configure("TNotebook.Tab", background=PANEL_2, foreground=MUTED,
+                        padding=(18, 10), font=("Segoe UI", 11, "bold"))
+        style.map("TNotebook.Tab", background=[("selected", GREEN)], foreground=[("selected", BG)])
+        style.configure("Area.TCheckbutton", background=PANEL_2, foreground=TEXT,
+                        font=("Segoe UI", 10, "bold"), padding=(10, 7),
+                        indicatorsize=19, indicatorbackground=PANEL)
+        style.map("Area.TCheckbutton", background=[("selected", "#214437"), ("active", LINE)],
+                  indicatorbackground=[("selected", GREEN)],
+                  indicatorforeground=[("selected", BG)], foreground=[("disabled", MUTED)])
         style.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=TEXT, rowheight=36, borderwidth=0)
         style.configure("Treeview.Heading", background=PANEL_2, foreground=MUTED, font=("Segoe UI Semibold", 9), relief="flat")
         style.map("Treeview", background=[("selected", "#214437")], foreground=[("selected", TEXT)])
@@ -370,14 +392,20 @@ class PCleanerApp:
         top = tk.Frame(outer, bg=BG)
         top.pack(fill="x")
         tk.Label(top, text="PCleaner", bg=BG, fg=TEXT, font=("Segoe UI", 25, "bold")).pack(side="left")
-        tk.Label(top, text="●  HAFİF · YEREL · HIZLI", bg=BG, fg=GREEN, font=("Segoe UI", 9, "bold")).pack(side="right", pady=(12, 0))
-        tk.Label(outer, text="Gereksiz dosyaları gör, seç ve temizle.", bg=BG, fg=MUTED, font=("Segoe UI", 11)).pack(anchor="w", pady=(2, 20))
+        self.pages = ttk.Notebook(outer)
+        self.pages.pack(fill="both", expand=True, pady=(16, 8))
+        cleanup = tk.Frame(self.pages, bg=BG, pady=12)
+        self.disk_page = tk.Frame(self.pages, bg=BG, pady=16)
+        report_page = tk.Frame(self.pages, bg=BG, pady=16)
+        self.pages.add(cleanup, text="Temizlik")
+        self.pages.add(self.disk_page, text="Disk Alanı")
+        self.pages.add(report_page, text="Sonuçlar")
 
-        hero = tk.Frame(outer, bg=PANEL, highlightbackground=LINE, highlightthickness=1, padx=20, pady=15)
+        hero = tk.Frame(cleanup, bg=PANEL, highlightbackground=LINE, highlightthickness=1, padx=20, pady=15)
         hero.pack(fill="x")
         hero_left = tk.Frame(hero, bg=PANEL)
         hero_left.pack(side="left", fill="x", expand=True)
-        tk.Label(hero_left, text="TARAMA ÖZETİ", bg=PANEL, fg=MUTED, font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        tk.Label(hero_left, text="SON TARAMA", bg=PANEL, fg=MUTED, font=("Segoe UI", 9, "bold")).pack(anchor="w")
         self.total_label = tk.Label(hero_left, text="Taranıyor…", bg=PANEL, fg=TEXT, font=("Segoe UI", 22, "bold"))
         self.total_label.pack(anchor="w", pady=(5, 1))
         toolbar = tk.Frame(hero, bg=PANEL)
@@ -388,7 +416,7 @@ class PCleanerApp:
         self.age_box.bind("<<ComboboxSelected>>", lambda _event: self.scan())
         buttons = tk.Frame(toolbar, bg=PANEL)
         buttons.pack(anchor="e")
-        self.scan_button = tk.Button(buttons, text="⟳  Tara", command=self.scan, bg=PANEL_2, fg=TEXT, activebackground="#22312b", activeforeground=TEXT, relief="flat", padx=12, pady=8, cursor="hand2")
+        self.scan_button = tk.Button(buttons, text="Seçilenleri tara", command=self.scan, bg=PANEL_2, fg=TEXT, activebackground="#22312b", activeforeground=TEXT, relief="flat", padx=12, pady=8, cursor="hand2")
         self.scan_button.pack(side="left")
         self.cancel_button = tk.Button(buttons, text="Durdur", command=self.cancel, bg="#392522", fg="#ffd5c6", activebackground="#56362f", activeforeground=TEXT, relief="flat", padx=12, pady=8, cursor="hand2", state="disabled")
         self.cancel_button.pack(side="left", padx=(8, 0))
@@ -396,57 +424,238 @@ class PCleanerApp:
         self.progress.pack(fill="x", pady=(8, 2))
         self.status = tk.Label(outer, text="Hazır", bg=BG, fg=MUTED, font=("Segoe UI", 9), anchor="w")
         self.status.pack(fill="x")
-        tk.Label(outer, text="Yaş filtresi Temp ve önbellekler içindir; Son Kullanılanlar kısayolları tarihten bağımsız gösterilir.", bg=BG, fg=MUTED, font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
+        help_text = "Yaş filtresi geçici dosyalara ve önbelleklere uygulanır."
+        tk.Label(cleanup, text=help_text, bg=BG, fg=MUTED).pack(anchor="w", pady=(8, 4))
+        self.area_controls = {}
+        self.area_results = {}
+        for key, label in LABELS.items():
+            row = tk.Frame(cleanup, bg=PANEL_2, padx=8, pady=3)
+            row.pack(fill="x", pady=2)
+            check = ttk.Checkbutton(row, text=label, variable=self.selected[key], style="Area.TCheckbutton", width=27)
+            check.pack(side="left")
+            ttk.Button(row, text="ⓘ  Nedir?", command=lambda k=key: self._show_area_help(k)).pack(side="right")
+            preview = ttk.Button(row, text="Dosyaları gör", command=lambda k=key: self.open_preview(k))
+            preview.pack(side="right", padx=8)
+            self.area_controls[key] = (check, preview)
+            result = tk.Label(row, bg=PANEL_2, fg=TEXT, anchor="w")
+            result.pack(side="left", fill="x", expand=True, padx=8)
+            self.area_results[key] = result
 
-        tk.Label(outer, text="TEMİZLİK ALANLARI  ·  ✓ sütununa tıklayarak seç", bg=BG, fg=MUTED, font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(16, 8))
-        self.table = ttk.Treeview(outer, columns=("area", "selected", "items", "size", "status"), show="headings", selectmode="browse", height=6)
-        for column, title, anchor in (("area", "ALAN", "w"), ("selected", "✓", "center"), ("items", "ÖĞE", "e"), ("size", "BOYUT", "e"), ("status", "DURUM", "e")):
-            self.table.heading(column, text=title, anchor=anchor)
-        self.table.column("area", width=300, anchor="w")
-        self.table.column("selected", width=54, anchor="center")
-        self.table.column("items", width=90, anchor="e")
-        self.table.column("size", width=115, anchor="e")
-        self.table.column("status", width=220, anchor="e")
-        self.table.pack(fill="x")
-        self.table.bind("<Button-1>", self._table_click)
-        tk.Label(outer, text="Önizleme: satıra çift tıkla veya dosyaları seçip hariç tut.", bg=BG, fg=MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(8, 0))
+        self.clean_button = tk.Button(
+            cleanup, text="Seçilenleri temizle", command=self.clean, bg=GREEN, fg=BG,
+            activebackground="#8af1c2", activeforeground=BG, font=("Segoe UI", 11, "bold"),
+            relief="flat", padx=18, pady=9, cursor="hand2",
+        )
+        self.clean_button.pack(anchor="e", pady=(12, 0))
+        self._build_disk_page()
+        self._build_performance_pages()
+        self.report_title = tk.Label(report_page, text="Henüz temizlik yapılmadı", bg=BG, fg=TEXT,
+                                     font=("Segoe UI", 17, "bold"))
+        self.report_title.pack(anchor="w")
+        self.report_text = tk.Text(report_page, bg=PANEL, fg=TEXT, relief="flat", wrap="word", state="disabled")
+        scroll = ttk.Scrollbar(report_page, orient="vertical", command=self.report_text.yview)
+        self.report_text.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y", pady=(14, 0))
+        self.report_text.pack(side="left", fill="both", expand=True, pady=(14, 0))
 
-        bottom = tk.Frame(outer, bg=BG)
-        bottom.pack(fill="x", pady=(14, 0))
-        self.preview_button = tk.Button(bottom, text="Dosyaları önizle", command=self.open_preview, bg=PANEL_2, fg=TEXT, activebackground="#22312b", activeforeground=TEXT, relief="flat", padx=15, pady=11, cursor="hand2")
-        self.preview_button.pack(side="left")
-        self.clean_button = tk.Button(bottom, text="✦  Seçilenleri temizle", command=self.clean, bg=GREEN, fg="#092016", activebackground="#79efb8", activeforeground="#092016", relief="flat", padx=19, pady=12, font=("Segoe UI", 10, "bold"), cursor="hand2")
-        self.clean_button.pack(side="right")
+    def _performance_page(self, name, columns):
+        page = tk.Frame(self.pages, bg=BG, pady=12)
+        self.pages.add(page, text=name)
+        toolbar = tk.Frame(page, bg=BG)
+        toolbar.pack(fill="x", pady=(0, 8))
+        note = tk.Label(page, bg=BG, fg=MUTED, anchor="w", wraplength=700, justify="left")
+        note.pack(fill="x", pady=(0, 8))
+        table = ttk.Treeview(page, columns=tuple(range(len(columns))), show="headings", selectmode="browse")
+        for index, (label, width) in enumerate(columns):
+            table.heading(str(index), text=label)
+            table.column(str(index), width=width, anchor="w", stretch=index == len(columns) - 1)
+        yscroll = ttk.Scrollbar(page, orient="vertical", command=table.yview)
+        xscroll = ttk.Scrollbar(page, orient="horizontal", command=table.xview)
+        table.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        xscroll.pack(side="bottom", fill="x")
+        yscroll.pack(side="right", fill="y")
+        table.pack(fill="both", expand=True)
+        return page, toolbar, note, table
 
-        footer = tk.Frame(outer, bg=BG)
-        footer.pack(fill="x", side="bottom", pady=(16, 0))
-        tk.Label(footer, text="Terminal: python pcleaner.py scan --days 7  ·  clean --dry-run ...", bg=BG, fg=MUTED, font=("Consolas", 9)).pack(side="left")
-        tk.Label(footer, text="Kilitli dosyalar atlanır", bg=BG, fg=MUTED, font=("Segoe UI", 9)).pack(side="right")
+    def _build_performance_pages(self):
+        self.performance_buttons = []
+        _, bar, startup_note, table_startup = self._performance_page("Başlangıç", (
+            ("Uygulama", 160), ("Durum", 100), ("Kapsam", 125), ("Komut veya konum", 315),
+        ))
+        startup_hint = "Run kayıtları ve Başlangıç klasörleri. Değişiklikler için Görev Yöneticisi’nde Başlangıç uygulamaları’nı aç."
+        startup_note.configure(text=startup_hint)
 
-    def _table_click(self, event):
-        if self.busy:
-            return "break"
-        if self.table.identify_region(event.x, event.y) == "cell" and self.table.identify_column(event.x) == "#2":
-            key = self.table.identify_row(event.y)
-            if key in self.selected:
-                self.selected[key].set(not self.selected[key].get())
-                self._refresh_table()
-                return "break"
+        def show_startup(result):
+            rows, unavailable = result
+            summary = f"{len(rows)} kayıt · {unavailable} kaynak okunamadı." if unavailable else f"{len(rows)} kayıt."
+            startup_note.configure(text=f"{summary} {startup_hint}")
+            self._fill_performance(table_startup, rows)
 
-    def _refresh_table(self):
-        for key in LABELS:
-            row = self.rows.get(key, ScanResult(key, LABELS[key], ""))
-            state = "●" if self.selected[key].get() else "○"
-            status = row.error or (f"{row.issue_count} konum atlandı" if row.issue_count else ("Temizlenebilir" if row.count else "Temiz"))
-            values = (LABELS[key], state, row.count, format_size(row.size), status)
-            if self.table.exists(key):
-                self.table.item(key, values=values)
+        self._performance_button(bar, "Listeyi yenile", lambda: self._performance_job(
+            "Başlangıç uygulamaları okunuyor…", lambda _: startup_entries(),
+            show_startup,
+        ))
+        ttk.Button(bar, text="Görev Yöneticisi’ni aç",
+                   command=lambda: self._open_location(str(windows_temp_root().parent / "System32/Taskmgr.exe"))).pack(side="left", padx=8)
+
+        _, bar, self.resource_note, self.process_table = self._performance_page("Kaynak Kullanımı", (
+            ("İşlem", 190), ("PID", 75), ("CPU", 90), ("Özel RAM", 115), ("İşlem G/Ç", 160),
+        ))
+        self.resource_note.configure(text="Anlık ölçüm al. İşlem G/Ç sayacı ağ ve diğer giriş/çıkış işlemlerini de kapsar.")
+        self.process_rows = []
+        order = ttk.Combobox(bar, values=("CPU", "RAM", "G/Ç"), state="readonly", width=8)
+        order.current(0)
+        order.pack(side="left", padx=(0, 8))
+        order.bind("<<ComboboxSelected>>", lambda _: self._render_processes(order.current()))
+        self._performance_button(bar, "Ölçümü yenile", lambda: self._performance_job(
+            "Kaynak kullanımı ölçülüyor…", lambda _: resource_snapshot(),
+            lambda result: self._show_resources(result, order.current()),
+        ))
+        ttk.Button(bar, text="Kaynak İzleyicisi’ni aç",
+                   command=lambda: self._open_location(str(windows_temp_root().parent / "System32/resmon.exe"))).pack(side="left", padx=8)
+
+        _, bar, note, table = self._performance_page("Büyük Dosyalar", (
+            ("Boyut", 110), ("Dosya yolu", 580),
+        ))
+        note.configure(text="Bir sürücü seç. Boyuta göre ilk 50 dosya gösterilir.")
+        mask = ctypes.windll.kernel32.GetLogicalDrives()
+        drives = [f"{chr(65 + index)}:\\" for index in range(26) if mask & (1 << index)]
+        drives = [path for path in drives if ctypes.windll.kernel32.GetDriveTypeW(path) in (2, 3)]
+        drive = ttk.Combobox(bar, values=drives, state="readonly", width=8)
+        drive.set(self.system_drive)
+        drive.pack(side="left", padx=(0, 8))
+
+        def scan_drive():
+            selected = drive.get()
+            if selected not in drives:
+                note.configure(text="Taramak için listeden bir sürücü seç.")
+                return
+            note.configure(text=f"Taranan sürücü: {selected}")
+            self._fill_performance(table, [])
+            self._performance_job(f"{selected} sürücüsü taranıyor…",
+                                  lambda cancel: largest_files(selected, cancel),
+                                  lambda result: show_files(selected, result), cancellable=True)
+
+        def show_files(selected, result):
+            rows, skipped = result
+            note.configure(text=f"{selected} · {len(rows)} dosya · {skipped:,} konum atlandı")
+            self._fill_performance(table, [(format_size(size), path) for size, path in rows])
+
+        def open_file_folder():
+            selection = table.selection()
+            if selection:
+                path = table.item(selection[0], "values")[1]
+                folder = os.path.dirname(path)
+                if os.path.isdir(folder):
+                    self._open_location(folder)
+                else:
+                    messagebox.showinfo(APP_NAME, "Dosyanın klasörüne artık erişilemiyor.", parent=self.root)
+
+        self._performance_button(bar, "Büyük dosyaları bul", scan_drive)
+        ttk.Button(bar, text="Dosyanın klasörünü aç", command=open_file_folder).pack(side="left", padx=8)
+
+    def _performance_button(self, parent, label, command):
+        button = ttk.Button(parent, text=label, command=command)
+        button.pack(side="left")
+        self.performance_buttons.append(button)
+
+    def _performance_job(self, status, work, render, cancellable=False):
+        self._begin()
+        self.status.configure(text=status)
+        if not cancellable:
+            self.cancel_button.configure(state="disabled")
+        cancel = self.cancel_event
+
+        def worker():
+            try:
+                self.events.put(("performance-done", render, work(cancel), None))
+            except (OSError, ValueError, TimeoutError, subprocess.TimeoutExpired) as exc:
+                self.events.put(("performance-done", render, None, str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _fill_performance(self, table, rows):
+        table.delete(*table.get_children())
+        for row in rows:
+            table.insert("", "end", values=row)
+
+    def _show_resources(self, snapshot, order):
+        self.process_rows, disk = snapshot
+        activity = f"{format_size(disk)}/sn" if disk is not None else "ölçülemedi"
+        self.resource_note.configure(text=f"Toplam fiziksel disk aktarımı: {activity}. İşlem G/Ç sayacı ağ ve diğer giriş/çıkış işlemlerini de kapsar. İşlem bazında disk için Kaynak İzleyicisi’nde Disk sekmesini aç.")
+        self._render_processes(order)
+
+    def _render_processes(self, order):
+        rows = sorted(self.process_rows, key=lambda row: row[2 + order], reverse=True)
+        self._fill_performance(self.process_table, [
+            (name, pid, f"%{cpu:.1f}", format_size(ram), f"{format_size(io)}/sn")
+            for name, pid, cpu, ram, io in rows
+        ])
+
+    def _open_location(self, path):
+        try:
+            os.startfile(path)
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, str(exc), parent=self.root)
+
+    def _show_area_help(self, key: str):
+        messagebox.showinfo(LABELS[key], AREA_HELP[key], parent=self.root)
+
+    def _refresh_areas(self):
+        for key, label in self.area_results.items():
+            row = self.rows.get(key)
+            if row is None:
+                label.configure(text="Taranmadı", fg=MUTED)
+            elif row.error:
+                label.configure(text="Taranamadı", fg=ORANGE)
             else:
-                self.table.insert("", "end", iid=key, values=values)
+                skipped = f"  ·  {row.issue_count} atlandı" if row.issue_count else ""
+                label.configure(text=f"{row.count:,} öğe  ·  {format_size(row.size)}{skipped}", fg=TEXT)
 
-    def _selected_key(self) -> str:
-        selection = self.table.selection()
-        return selection[0] if selection else "user-temp"
+    def _build_disk_page(self):
+        tk.Label(self.disk_page, text=f"Windows sürücüsü ({self.system_drive})", bg=BG, fg=TEXT,
+                 font=("Segoe UI", 19, "bold")).pack(anchor="w")
+        cards = tk.Frame(self.disk_page, bg=BG)
+        cards.pack(fill="x", pady=18)
+        self.disk_cards = []
+        for heading in ("Güncel boş alan", "Temizlik öncesi", "Temizlik sonrası"):
+            card = tk.Frame(cards, bg=PANEL, padx=16, pady=14)
+            card.pack(side="left", fill="both", expand=True, padx=(0, 6))
+            tk.Label(card, text=heading, bg=PANEL, fg=MUTED).pack(anchor="w")
+            value = tk.Label(card, text="—", bg=PANEL, fg=TEXT, font=("Segoe UI", 17, "bold"))
+            value.pack(anchor="w", pady=(6, 4))
+            bar = ttk.Progressbar(card, maximum=100)
+            bar.pack(fill="x", pady=(0, 4))
+            detail = tk.Label(card, bg=PANEL, fg=MUTED)
+            detail.pack(anchor="w")
+            self.disk_cards.append((value, bar, detail))
+        self.disk_change = tk.Label(self.disk_page, bg=BG, fg=GREEN, font=("Segoe UI", 11, "bold"))
+        self.disk_change.pack(anchor="w")
+        tk.Label(self.disk_page, text="Boş alan değişimine diğer uygulamaların disk işlemleri de yansıyabilir.",
+                 bg=BG, fg=MUTED).pack(anchor="w", pady=(6, 12))
+        ttk.Button(self.disk_page, text="Güncel alanı yenile",
+                   command=lambda: self._refresh_disk(self._disk_usage())).pack(anchor="w")
+
+    def _disk_usage(self):
+        try:
+            return shutil.disk_usage(self.system_drive)
+        except OSError:
+            return None
+
+    def _refresh_disk(self, current, comparison=None):
+        samples = (current, *comparison) if comparison is not None else (current,)
+        for (value, bar, detail), usage in zip(self.disk_cards, samples):
+            value.configure(text=f"{format_size(usage.free)} boş" if usage else "Ölçülemedi")
+            bar.configure(value=100 * usage.used / usage.total if usage and usage.total else 0)
+            detail.configure(text=f"{format_size(usage.used)} / {format_size(usage.total)} dolu" if usage else "")
+        if comparison is not None:
+            before, after = comparison
+            if before and after:
+                change = after.free - before.free
+                sign = "+" if change > 0 else ("−" if change < 0 else "")
+                self.disk_change.configure(text=f"Boş alan değişimi  {sign}{format_size(abs(change))}")
+            else:
+                self.disk_change.configure(text="Boş alan değişimi ölçülemedi.")
 
     def _days_value(self) -> int:
         try:
@@ -459,9 +668,12 @@ class PCleanerApp:
         self.cancel_event = threading.Event()
         self.scan_button.configure(state="disabled")
         self.clean_button.configure(state="disabled")
-        self.preview_button.configure(state="disabled")
         self.age_box.configure(state="disabled")
-        self.table.configure(selectmode="none")
+        for check, preview in self.area_controls.values():
+            check.state(["disabled"])
+            preview.state(["disabled"])
+        for button in self.performance_buttons:
+            button.state(["disabled"])
         self.cancel_button.configure(state="normal")
         self.progress.configure(mode="indeterminate")
         self.progress.start(12)
@@ -471,9 +683,12 @@ class PCleanerApp:
         self.cancel_button.configure(state="disabled")
         self.scan_button.configure(state="normal")
         self.clean_button.configure(state="normal")
-        self.preview_button.configure(state="normal")
         self.age_box.configure(state="readonly")
-        self.table.configure(selectmode="browse")
+        for key, (check, preview) in self.area_controls.items():
+            check.state(["!disabled"])
+            preview.state(["!disabled"] if key in self.rows else ["disabled"])
+        for button in self.performance_buttons:
+            button.state(["!disabled"])
         self.progress.stop()
         self.progress.configure(mode="indeterminate")
 
@@ -486,16 +701,27 @@ class PCleanerApp:
     def scan(self):
         if self.busy:
             return
-        self._begin()
+        keys = [key for key, selected in self.selected.items() if selected.get()]
         self.rows = {}
-        self._refresh_table()
+        self._refresh_areas()
+        if not keys:
+            self._end()
+            self.total_label.configure(text="Alan seçilmedi")
+            self.status.configure(text="Taramak istediğin alanları işaretle.")
+            return
+        self._begin()
         self.total_label.configure(text="Taranıyor…")
         self.status.configure(text=f"{self._days_value()} günlük filtreyle alanlar taranıyor…")
         cancel = self.cancel_event
         days = self._days_value()
         def worker():
-            rows = scan_categories(LABELS, days, cancel, lambda key, count: self.events.put(("scan-progress", key, count)))
-            self.events.put(("scan-done", rows, cancel.is_set()))
+            start = time.perf_counter()
+            try:
+                rows = scan_categories(keys, days, cancel, lambda key, count: self.events.put(("scan-progress", key, count)))
+            except OSError as exc:
+                self.events.put(("scan-error", str(exc)))
+                return
+            self.events.put(("scan-done", rows, cancel.is_set(), time.perf_counter() - start))
         threading.Thread(target=worker, daemon=True).start()
 
     def _poll_events(self):
@@ -505,15 +731,32 @@ class PCleanerApp:
                 if event[0] == "scan-progress":
                     self.status.configure(text=f"{LABELS[event[1]]}: {event[2]:,} dosya incelendi…")
                 elif event[0] == "scan-done":
-                    _, rows, cancelled = event
+                    _, rows, cancelled, elapsed = event
                     if rows and not cancelled:
                         self.rows = rows
-                        self._refresh_table()
+                        self._refresh_areas()
                         count = sum(row.count for row in rows.values())
                         size = sum(row.size for row in rows.values())
                         self.total_label.configure(text=f"{format_size(size)}  ·  {count} öğe")
                     self._end()
-                    self.status.configure(text="Tarama iptal edildi; kısmi sonuçlar temizliğe açılmadı." if cancelled else "Tarama tamamlandı")
+                    if cancelled:
+                        self.total_label.configure(text="Tarama iptal edildi")
+                    self.status.configure(text="Tarama iptal edildi; kısmi sonuçlar temizliğe açılmadı." if cancelled else f"{len(rows)} alan tarandı · {elapsed:.2f} sn")
+                elif event[0] == "scan-error":
+                    self._end()
+                    self.total_label.configure(text="Tarama başarısız")
+                    self.status.configure(text=event[1])
+                elif event[0] == "performance-done":
+                    _, render, result, error = event
+                    self._end()
+                    if self.cancel_event.is_set():
+                        self.status.configure(text="Tarama iptal edildi.")
+                    elif error is not None:
+                        self.status.configure(text="İşlem tamamlanamadı.")
+                        messagebox.showerror(APP_NAME, error, parent=self.root)
+                    else:
+                        render(result)
+                        self.status.configure(text="Liste güncellendi.")
                 elif event[0] == "clean-progress":
                     _, key, current, total = event
                     if total:
@@ -521,16 +764,17 @@ class PCleanerApp:
                         self.progress.configure(mode="determinate", maximum=total, value=current)
                     self.status.configure(text=f"{LABELS[key]} temizleniyor: {current:,}/{total:,}…")
                 elif event[0] == "clean-done":
-                    outcomes = event[1]
+                    _, outcomes, before, after = event
                     self._end()
+                    self._refresh_disk(after, (before, after))
                     self._show_report(outcomes)
-                    self.status.configure(text="Temizlik bitti; atlanan dosyaların ayrıntıları raporda.")
+                    self.pages.select(self.disk_page)
                     self.scan()
         except queue.Empty:
             pass
         self.root.after(100, self._poll_events)
 
-    def open_preview(self):
+    def open_preview(self, key: str):
         if self.busy:
             return
         if not self.rows:
@@ -540,18 +784,21 @@ class PCleanerApp:
         window.title("PCleaner · Dosya önizlemesi")
         window.geometry("950x620")
         window.configure(bg=BG)
+        window.transient(self.root)
+        window.grab_set()
         frame = tk.Frame(window, bg=BG, padx=18, pady=14)
         frame.pack(fill="both", expand=True)
         top = tk.Frame(frame, bg=BG)
         top.pack(fill="x")
         tk.Label(top, text="TEMİZLENECEK DOSYALAR", bg=BG, fg=TEXT, font=("Segoe UI", 15, "bold")).pack(side="left")
         label_to_key = {label: key for key, label in LABELS.items()}
-        preview_key = tk.StringVar(value=LABELS[self._selected_key()])
-        selector = ttk.Combobox(top, textvariable=preview_key, state="readonly", width=34, values=list(LABELS.values()))
+        preview_key = tk.StringVar(value=LABELS[key])
+        selector = ttk.Combobox(top, textvariable=preview_key, state="readonly", width=34, values=[LABELS[area] for area in self.rows])
         selector.pack(side="right")
         info = tk.Label(frame, text="", bg=BG, fg=MUTED, anchor="w")
         info.pack(fill="x", pady=(8, 10))
-        table = ttk.Treeview(frame, columns=("state", "size", "date", "path"), show="headings", selectmode="extended")
+        listing = tk.Frame(frame, bg=BG)
+        table = ttk.Treeview(listing, columns=("state", "size", "date", "path"), show="headings", selectmode="extended")
         for col, title in (("state", "DURUM"), ("size", "BOYUT"), ("date", "DEĞİŞTİRİLME"), ("path", "DOSYA YOLU")):
             table.heading(col, text=title, anchor="w")
         table.column("state", width=90, anchor="center")
@@ -559,14 +806,15 @@ class PCleanerApp:
         table.column("date", width=145, anchor="w")
         table.column("path", width=590, anchor="w")
         table.tag_configure("excluded", foreground="#82918a")
-        scroll = ttk.Scrollbar(frame, orient="vertical", command=table.yview)
-        xscroll = ttk.Scrollbar(frame, orient="horizontal", command=table.xview)
+        scroll = ttk.Scrollbar(listing, orient="vertical", command=table.yview)
+        xscroll = ttk.Scrollbar(listing, orient="horizontal", command=table.xview)
         table.configure(yscrollcommand=scroll.set, xscrollcommand=xscroll.set)
-        table.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
         xscroll.pack(side="bottom", fill="x")
+        scroll.pack(side="right", fill="y")
+        table.pack(side="left", fill="both", expand=True)
         nav = tk.Frame(frame, bg=BG)
-        nav.pack(fill="x", pady=(10, 0))
+        nav.pack(side="bottom", fill="x", pady=(10, 0))
+        listing.pack(fill="both", expand=True)
         page = {"index": 0, "ids": {}}
         page_size = 150
 
@@ -622,6 +870,8 @@ class PCleanerApp:
         render_page()
 
     def clean(self):
+        if self.busy:
+            return
         keys = [key for key, variable in self.selected.items() if variable.get()]
         if not keys:
             messagebox.showinfo(APP_NAME, "Önce temizlemek istediğin alanları seç.", parent=self.root)
@@ -656,30 +906,24 @@ class PCleanerApp:
         excluded = set(self.excluded)
         order = [key for key in keys if key != "recycle"] + (["recycle"] if "recycle" in keys else [])
         def worker():
+            before = self._disk_usage()
             outcomes = {}
             for key in order:
                 if cancel.is_set():
                     outcomes[key] = CleanResult(key, cancelled=True)
                 else:
                     outcomes[key] = clean_category(key, self.rows[key], excluded, days, cancel, lambda k, current, total: self.events.put(("clean-progress", k, current, total)))
-            self.events.put(("clean-done", outcomes))
+            self.events.put(("clean-done", outcomes, before, self._disk_usage()))
         threading.Thread(target=worker, daemon=True).start()
 
     def _show_report(self, outcomes: dict[str, CleanResult]):
-        window = tk.Toplevel(self.root)
-        window.title("PCleaner · Temizlik raporu")
-        window.geometry("820x540")
-        window.configure(bg=BG)
-        frame = tk.Frame(window, bg=BG, padx=18, pady=16)
-        frame.pack(fill="both", expand=True)
         removed = sum(item.removed for item in outcomes.values())
         size = sum(item.size for item in outcomes.values())
-        tk.Label(frame, text=f"{removed:,} öğe temizlendi · {format_size(size)}", bg=BG, fg=GREEN, font=("Segoe UI", 17, "bold")).pack(anchor="w")
-        text = tk.Text(frame, bg=PANEL, fg=TEXT, insertbackground=TEXT, relief="flat", wrap="none", font=("Consolas", 9))
-        scroll = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
-        text.configure(yscrollcommand=scroll.set)
-        text.pack(side="left", fill="both", expand=True, pady=(14, 0))
-        scroll.pack(side="right", fill="y", pady=(14, 0))
+        heading = "Temizlik durduruldu" if self.cancel_event.is_set() else "Temizlik tamamlandı"
+        self.report_title.configure(text=f"{heading} · {removed:,} öğe · {format_size(size)}")
+        text = self.report_text
+        text.configure(state="normal")
+        text.delete("1.0", "end")
         for key, outcome in outcomes.items():
             text.insert("end", f"{LABELS[key]}: {outcome.removed} temizlendi · {format_size(outcome.size)}\n")
             if outcome.cancelled:

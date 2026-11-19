@@ -13,6 +13,10 @@ PCleaner runs locally and has no runtime dependencies beyond the Python standard
 - Offers optional browser cache and Windows thumbnail cache cleanup.
 - Supports terminal scanning, dry runs, age filters, reports, and cancellation.
 - Shows selected cleanup areas and the amount of space recovered.
+- Scans selected cleanup categories in the desktop app and reports elapsed scan time.
+- Lists classic Windows startup entries and opens Task Manager to manage them.
+- Shows a sortable CPU, private RAM and process I/O snapshot, plus total physical disk throughput.
+- Finds the 50 largest files on a selected local drive and opens their folders in Explorer.
 
 ## Quick start
 
